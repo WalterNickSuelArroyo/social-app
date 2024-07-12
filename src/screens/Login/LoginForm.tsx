@@ -12,6 +12,11 @@ import {
 } from '@atproto/api'
 import {msg, Trans} from '@lingui/macro'
 import {useLingui} from '@lingui/react'
+import {
+  GoogleLogin,
+  GoogleLoginResponse,
+  GoogleLoginResponseOffline,
+} from 'react-google-login'
 
 import {useAnalytics} from '#/lib/analytics/analytics'
 import {isNetworkError} from '#/lib/strings/errors'
@@ -21,7 +26,6 @@ import {logger} from '#/logger'
 import {useSessionApi} from '#/state/session'
 import {useLoggedOutViewControls} from '#/state/shell/logged-out'
 import {useRequestNotificationsPermission} from 'lib/notifications/notifications'
-import {useSetHasCheckedForStarterPack} from 'state/preferences/used-starter-packs'
 import {atoms as a, useTheme} from '#/alf'
 import {Button, ButtonIcon, ButtonText} from '#/components/Button'
 import {FormError} from '#/components/forms/FormError'
@@ -60,18 +64,57 @@ export const LoginForm = ({
   const {track} = useAnalytics()
   const t = useTheme()
   const [isProcessing, setIsProcessing] = useState<boolean>(false)
-  const [isReady, setIsReady] = useState<boolean>(false)
   const [isAuthFactorTokenNeeded, setIsAuthFactorTokenNeeded] =
     useState<boolean>(false)
-  const identifierValueRef = useRef<string>(initialHandle || '')
-  const passwordValueRef = useRef<string>('')
-  const authFactorTokenValueRef = useRef<string>('')
-  const passwordRef = useRef<TextInput>(null)
+  const [identifier, setIdentifier] = useState<string>(initialHandle)
+  const [password, setPassword] = useState<string>('')
+  const [authFactorToken, setAuthFactorToken] = useState<string>('')
+  const passwordInputRef = useRef<TextInput>(null)
   const {_} = useLingui()
   const {login} = useSessionApi()
   const requestNotificationsPermission = useRequestNotificationsPermission()
   const {setShowLoggedOut} = useLoggedOutViewControls()
-  const setHasCheckedForStarterPack = useSetHasCheckedForStarterPack()
+
+  const handleGoogleLogin = async (tokenId: string) => {
+    try {
+      const response = await fetch('/api/google/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({tokenId}),
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to authenticate with Google')
+      }
+
+      const data = await response.json()
+      if (data.success) {
+        setShowLoggedOut(false)
+      } else {
+        throw new Error('Failed to authenticate with Google')
+      }
+    } catch (error) {
+      console.error('Failed to login with Google:', error)
+      setError('Failed to authenticate with Google. Please try again.')
+    }
+  }
+
+  const responseGoogle = (
+    response: GoogleLoginResponse | GoogleLoginResponseOffline,
+  ) => {
+    if ('profileObj' in response) {
+      console.log('Google login response: ', response)
+      console.log('User Info:', response.profileObj)
+      console.log('Token ID for session:', response.tokenId)
+
+      handleGoogleLogin(response.tokenId)
+    } else {
+      console.error('Failed to login with Google: ', response)
+      setError('Failed to authenticate with Google. Please try again.')
+    }
+  }
 
   const onPressSelectService = React.useCallback(() => {
     Keyboard.dismiss()
@@ -84,10 +127,6 @@ export const LoginForm = ({
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
     setError('')
     setIsProcessing(true)
-
-    const identifier = identifierValueRef.current.toLowerCase().trim()
-    const password = passwordValueRef.current
-    const authFactorToken = authFactorTokenValueRef.current
 
     try {
       // try to guess the handle if the user just gave their own username
@@ -123,7 +162,6 @@ export const LoginForm = ({
         'LoginForm',
       )
       setShowLoggedOut(false)
-      setHasCheckedForStarterPack(true)
       requestNotificationsPermission('Login')
     } catch (e: any) {
       const errMsg = e.toString()
@@ -157,22 +195,7 @@ export const LoginForm = ({
     }
   }
 
-  const checkIsReady = () => {
-    if (
-      !!serviceDescription &&
-      !!identifierValueRef.current &&
-      !!passwordValueRef.current
-    ) {
-      if (!isReady) {
-        setIsReady(true)
-      }
-    } else {
-      if (isReady) {
-        setIsReady(false)
-      }
-    }
-  }
-
+  const isReady = !!serviceDescription && !!identifier && !!password
   return (
     <FormContainer testID="loginForm" titleText={<Trans>Sign in</Trans>}>
       <View>
@@ -201,15 +224,14 @@ export const LoginForm = ({
               autoComplete="username"
               returnKeyType="next"
               textContentType="username"
-              defaultValue={initialHandle || ''}
-              onChangeText={v => {
-                identifierValueRef.current = v
-                checkIsReady()
-              }}
               onSubmitEditing={() => {
-                passwordRef.current?.focus()
+                passwordInputRef.current?.focus()
               }}
               blurOnSubmit={false} // prevents flickering due to onSubmitEditing going to next field
+              value={identifier}
+              onChangeText={str =>
+                setIdentifier((str || '').toLowerCase().trim())
+              }
               editable={!isProcessing}
               accessibilityHint={_(
                 msg`Input the username or email address you used at signup`,
@@ -221,7 +243,7 @@ export const LoginForm = ({
             <TextField.Icon icon={Lock} />
             <TextField.Input
               testID="loginPasswordInput"
-              inputRef={passwordRef}
+              inputRef={passwordInputRef}
               label={_(msg`Password`)}
               autoCapitalize="none"
               autoCorrect={false}
@@ -231,14 +253,16 @@ export const LoginForm = ({
               secureTextEntry={true}
               textContentType="password"
               clearButtonMode="while-editing"
-              onChangeText={v => {
-                passwordValueRef.current = v
-                checkIsReady()
-              }}
+              value={password}
+              onChangeText={setPassword}
               onSubmitEditing={onPressNext}
               blurOnSubmit={false} // HACK: https://github.com/facebook/react-native/issues/21911#issuecomment-558343069 Keyboard blur behavior is now handled in onSubmitEditing
               editable={!isProcessing}
-              accessibilityHint={_(msg`Input your password`)}
+              accessibilityHint={
+                identifier === ''
+                  ? _(msg`Input your password`)
+                  : _(msg`Input the password tied to ${identifier}`)
+              }
             />
             <Button
               testID="forgotPasswordButton"
@@ -277,9 +301,8 @@ export const LoginForm = ({
               returnKeyType="done"
               textContentType="username"
               blurOnSubmit={false} // prevents flickering due to onSubmitEditing going to next field
-              onChangeText={v => {
-                authFactorTokenValueRef.current = v
-              }}
+              value={authFactorToken}
+              onChangeText={setAuthFactorToken}
               onSubmitEditing={onPressNext}
               editable={!isProcessing}
               accessibilityHint={_(
@@ -305,6 +328,27 @@ export const LoginForm = ({
           </ButtonText>
         </Button>
         <View style={a.flex_1} />
+        {/* Botón para iniciar sesión con Google */}
+        <GoogleLogin
+          clientId="861120879530-5bhbvkc5lf6bltelrmugdr8csrajdkbt.apps.googleusercontent.com"
+          buttonText="Sign in with Google"
+          onSuccess={responseGoogle as any}
+          onFailure={responseGoogle as any}
+          cookiePolicy={'single_host_origin'}
+          render={renderProps => (
+            <Button
+              onPress={renderProps.onClick}
+              disabled={renderProps.disabled}
+              label={_(msg`Sign in with Google`)}
+              variant="solid"
+              color="primary"
+              size="medium">
+              <ButtonText>
+                <Trans>Sign in with Google</Trans>
+              </ButtonText>
+            </Button>
+          )}
+        />
         {!serviceDescription && error ? (
           <Button
             testID="loginRetryButton"
